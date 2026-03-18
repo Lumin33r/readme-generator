@@ -1,0 +1,54 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Repository Scanner",
+    "version": "1.0.0",
+    "description": "API for scanning a Git repository and listing its files."
+  },
+  "paths": {
+    "/scan-repo": {
+      "post": {
+        "operationId": "scanRepo",
+        "summary": "Scans a public Git repository and returns a list of its files.",
+        "description": "This tool takes a public GitHub repository URL, clones it, and lists all the files inside it. Use this when a user wants you to analyze a GitHub repository.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "repo_url": {
+                    "type": "string",
+                    "description": "The full URL of the public GitHub repository to scan."
+                  }
+                },
+                "required": ["repo_url"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A JSON object containing a list of file paths.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "files": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

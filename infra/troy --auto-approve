@@ -1,0 +1,18 @@
+{
+    "agentActionGroup": {
+        "agentId": "BIR39PSJHG",
+        "agentVersion": "DRAFT",
+        "actionGroupId": "OJ5WBVSPKZ",
+        "actionGroupName": "ScanRepoAction",
+        "clientToken": "f277e6b1-9ce9-46f2-b6db-38db2d5052de",
+        "createdAt": "2026-03-17T03:29:19.091676+00:00",
+        "updatedAt": "2026-03-17T04:23:16.091231+00:00",
+        "actionGroupExecutor": {
+            "lambda": "arn:aws:lambda:us-west-2:388691194728:function:RepoScannerTool"
+        },
+        "apiSchema": {
+            "payload": "{\n  \"openapi\": \"3.0.0\",\n  \"info\": {\n    \"title\": \"Repository Scanner\",\n    \"version\": \"1.0.0\",\n    \"description\": \"API for scanning a Git repository and listing its files.\"\n  },\n  \"paths\": {\n    \"/scan-repo\": {\n      \"post\": {\n        \"operationId\": \"scanRepo\",\n        \"summary\": \"Scans a public Git repository and returns a list of its files.\",\n        \"description\": \"This tool takes a public GitHub repository URL, clones it, and lists all the files inside it. Use this when a user wants you to analyze a GitHub repository.\",\n        \"requestBody\": {\n          \"required\": true,\n          \"content\": {\n            \"application/json\": {\n              \"schema\": {\n                \"type\": \"object\",\n                \"properties\": {\n                  \"repo_url\": {\n                    \"type\": \"string\",\n                    \"description\": \"The full URL of the public GitHub repository to scan.\"\n                  }\n                },\n                \"required\": [\"repo_url\"]\n              }\n            }\n          }\n        },\n        \"responses\": {\n          \"200\": {\n            \"description\": \"A JSON object containing a list of file paths.\",\n            \"content\": {\n              \"application/json\": {\n                \"schema\": {\n                  \"type\": \"object\",\n                  \"properties\": {\n                    \"files\": {\n                      \"type\": \"array\",\n                      \"items\": {\n                        \"type\": \"string\"\n                      }\n                    }\n                  }\n                }\n              }\n            }\n          }\n        }\n      }\n    }\n  }\n}\n"
+        },
+        "actionGroupState": "DISABLED"
+    }
+}
