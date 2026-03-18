@@ -78,7 +78,7 @@ resource "aws_lambda_function" "repo_scanner_lambda" {
 
 module "repo_scanner_agent" {
   source                  = "./modules/bedrock_agent"
-  agent_name              = "Repo_Scanner_Agent"
+  agent_name              = "Repo_Scanner_Agent_troy"
   agent_resource_role_arn = module.bedrock_agent_role.role_arn # Uses the dedicated Bedrock role
   instruction             = "Your job is to use the scan_repo tool to get a file list from a public GitHub URL. You are a helpful AI assistant. When a user provides a GitHub URL, you must use the available tool to scan it."
 }
@@ -106,4 +106,43 @@ resource "aws_lambda_permission" "allow_bedrock_to_invoke_lambda" {
   function_name = aws_lambda_function.repo_scanner_lambda.function_name
   principal     = "bedrock.amazonaws.com"
   source_arn    = module.repo_scanner_agent.agent_arn
+}
+
+# prompt for the second agent that will analyze the file list and generate the README summary
+
+module "project_summarizer_agent" {
+  source                  = "./modules/bedrock_agent"
+  agent_name              = "Project_Summarizer_Agent_troy"
+  agent_resource_role_arn = module.bedrock_agent_role.role_arn
+  instruction             = <<-EOT
+    You are an expert software developer. Your ONLY task is to analyze the following list of filenames and write a single, concise paragraph summarizing the project's likely purpose.
+    Infer the main programming language and potential frameworks from file extensions and common project file names (e.g., 'pom.xml' implies Java/Maven, 'package.json' implies Node.js).
+    Do not add any preamble or extra text. Only provide the summary paragraph.
+  EOT
+}
+
+# prompt for the third agent that will analyze the file list and generate a 'Getting Started' section for the README
+
+module "installation_guide_agent" {
+  source                  = "./modules/bedrock_agent"
+  agent_name              = "Installation_Guide_Agent_troy"
+  agent_resource_role_arn = module.bedrock_agent_role.role_arn
+  instruction             = <<-EOT
+    You are a technical writer. Your ONLY job is to scan the provided list of filenames.
+    If you see a common dependency file like 'requirements.txt', 'package.json', 'pom.xml', or 'go.mod', write a '## Getting Started' section in Markdown that includes the standard command to install dependencies for that file type.
+    If you do not see any recognizable dependency files, respond with the exact text: 'No dependency management file found.'
+  EOT
+}
+
+# prompt for the fourth agent that will analyze the file list and generate a 'Usage' section for the README
+
+module "usage_examples_agent" {
+  source                  = "./modules/bedrock_agent"
+  agent_name              = "Usage_Examples_Agent_troy"
+  agent_resource_role_arn = module.bedrock_agent_role.role_arn
+  instruction             = <<-EOT
+    You are a software developer. Your ONLY task is to look at the list of filenames and identify the most likely main script or entry point (e.g., 'main.py', 'index.js', 'app.py').
+    Write a '## Usage' section in Markdown that shows a common command to run the project.
+    For example, if you see 'main.py', suggest 'python main.py'.
+  EOT
 }
