@@ -288,3 +288,78 @@ resource "aws_s3_bucket_notification" "bucket_notification" {
 
   depends_on = [aws_lambda_permission.allow_s3_to_invoke_orchestrator]
 }
+
+# Add to main.tf
+
+# --- NEW RESOURCES FOR CI/CD PIPELINE ---
+
+resource "random_string" "state_bucket_suffix" {
+  length  = 8
+  special = false
+  upper   = false
+}
+
+resource "aws_s3_bucket" "terraform_state" {
+  bucket = "tf-readme-generator-state-${random_string.state_bucket_suffix.result}"
+}
+
+resource "aws_dynamodb_table" "terraform_locks" {
+  name         = "readme-generator-tf-locks"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "LockID"
+
+  attribute {
+    name = "LockID"
+    type = "S"
+  }
+}
+
+output "terraform_state_bucket_name" {
+  description = "The name of the S3 bucket for the Terraform state."
+  value       = aws_s3_bucket.terraform_state.bucket
+}
+
+# Add to main.tf
+
+# Find the existing OIDC provider for GitHub in the AWS account.
+data "aws_iam_openid_connect_provider" "github" {
+  url = "https://token.actions.githubusercontent.com"
+}
+
+data "aws_iam_policy_document" "github_actions_trust_policy" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    effect  = "Allow"
+
+    principals {
+      type        = "Federated"
+      identifiers = [data.aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      # This line ensures ONLY your specific repo can use this role
+      values = ["repo:https://github.com/Lumin33r/readme-generator:ref:refs/heads/main"]
+    }
+  }
+}
+
+# This is a NEW role, separate from your Lambda and Bedrock roles.
+# Its only job is to give GitHub Actions permission to run 'terraform apply'.
+resource "aws_iam_role" "github_actions_role" {
+  name               = "GitHubActionsRole-ReadmeGenerator"
+  assume_role_policy = data.aws_iam_policy_document.github_actions_trust_policy.json
+}
+
+resource "aws_iam_role_policy_attachment" "github_actions_permissions" {
+  role = aws_iam_role.github_actions_role.name
+  # NOTE: In a production environment, you would create a custom, least-privilege policy.
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
+# Add this new output to your outputs.tf or main.tf
+output "github_actions_role_arn" {
+  description = "The ARN of the IAM role for GitHub Actions."
+  value       = aws_iam_role.github_actions_role.arn
+}
