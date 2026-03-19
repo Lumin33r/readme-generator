@@ -108,38 +108,66 @@ resource "aws_lambda_permission" "allow_bedrock_to_invoke_lambda" {
   source_arn    = module.repo_scanner_agent.agent_arn
 }
 
+# root/main.tf
+
 module "project_summarizer_agent" {
   source                  = "./modules/bedrock_agent"
   agent_name              = "Project_Summarizer_Agent"
   agent_resource_role_arn = module.bedrock_agent_role.role_arn
   instruction             = <<-EOT
-    You are an expert software developer. Your ONLY task is to analyze the following list of filenames and write a single, concise paragraph summarizing the project's likely purpose.
-    Infer the main programming language and potential frameworks from file extensions and common project file names (e.g., 'pom.xml' implies Java/Maven, 'package.json' implies Node.js).
-    Do not add any preamble or extra text. Only provide the summary paragraph.
+    You are an expert software developer writing a project summary for a README.md.
+    Analyze the provided file list and write a confident, factual summary of the project's purpose and key components.
+    **Do not use uncertain or hedging language** like 'it appears to be,' 'likely,' or 'seems to be.' State your analysis as fact.
+    Your response must be only the summary paragraph.
   EOT
 }
+
+# root/main.tf
 
 module "installation_guide_agent" {
   source                  = "./modules/bedrock_agent"
   agent_name              = "Installation_Guide_Agent"
   agent_resource_role_arn = module.bedrock_agent_role.role_arn
   instruction             = <<-EOT
-    You are a technical writer. Your ONLY job is to scan the provided list of filenames.
-    If you see a common dependency file like 'requirements.txt', 'package.json', 'pom.xml', or 'go.mod', write a '## Getting Started' section in Markdown that includes the standard command to install dependencies for that file type.
-    If you do not see any recognizable dependency files, respond with the exact text: 'No dependency management file found.'
+    You are a technical writer creating a README.md. Your ONLY job is to scan the provided list of filenames.
+    If you see a common dependency file, write a '## Installation' section in Markdown.
+    Your response must be concise and contain ONLY the command.
+    For example, if you see 'requirements.txt', your entire response MUST be:
+    ## Installation
+    `
+    `
+    `bash
+    pip install -r requirements.txt
+    `
+    `
+    `
+    If you do not see any recognizable dependency files, respond with an empty string.
   EOT
 }
+
+# root/main.tf
 
 module "usage_examples_agent" {
   source                  = "./modules/bedrock_agent"
   agent_name              = "Usage_Examples_Agent"
   agent_resource_role_arn = module.bedrock_agent_role.role_arn
   instruction             = <<-EOT
-    You are a software developer. Your ONLY task is to look at the list of filenames and identify the most likely main script or entry point (e.g., 'main.py', 'index.js', 'app.py').
-    Write a '## Usage' section in Markdown that shows a common command to run the project.
-    For example, if you see 'main.py', suggest 'python main.py'.
+    You are a software developer writing a README.md. Your ONLY task is to identify the most likely entry point from a list of filenames.
+    Write a '## Usage' section in Markdown showing the command to run the project.
+    Your response MUST be concise and wrap the command in a bash code block.
+    For example, if you see 'main.py', your entire response MUST be:
+    ## Usage
+    `
+    `
+    `bash
+    python main.py
+    `
+    `
+    `
   EOT
 }
+
+# root/main.tf
 
 # root/main.tf
 
@@ -148,9 +176,11 @@ module "final_compiler_agent" {
   agent_name              = "Final_Compiler_Agent"
   agent_resource_role_arn = module.bedrock_agent_role.role_arn
   instruction             = <<-EOT
-    You are a technical document compiler. Your ONLY task is to take a JSON object containing different sections of a README file (project_summary, installation_guide, and usage_examples) and assemble them into a single, well-formatted Markdown document.
-    Use the repository name for the main H1 header. Use H2 headers for all other sections (e.g., ## Project Summary, ## Installation, ## Usage).
-    Do not add any preamble, apologies, or conversational text. Only return the pure, complete Markdown document.
+    You are a technical document compiler. Your task is to take a JSON object containing different sections of a README file and assemble them into a single Markdown document.
+    Use the repository name for the main H1 header (e.g., # repository_name).
+    Combine the other sections provided.
+    Your output MUST be only the pure, complete Markdown document.
+    Do NOT include any preamble, apologies, explanations of your process, or any conversational text.
   EOT
 }
 
@@ -257,4 +287,79 @@ resource "aws_s3_bucket_notification" "bucket_notification" {
   }
 
   depends_on = [aws_lambda_permission.allow_s3_to_invoke_orchestrator]
+}
+
+# Add to main.tf
+
+# --- NEW RESOURCES FOR CI/CD PIPELINE ---
+
+resource "random_string" "state_bucket_suffix" {
+  length  = 8
+  special = false
+  upper   = false
+}
+
+resource "aws_s3_bucket" "terraform_state" {
+  bucket = "tf-readme-generator-state-${random_string.state_bucket_suffix.result}"
+}
+
+resource "aws_dynamodb_table" "terraform_locks" {
+  name         = "readme-generator-tf-locks"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "LockID"
+
+  attribute {
+    name = "LockID"
+    type = "S"
+  }
+}
+
+output "terraform_state_bucket_name" {
+  description = "The name of the S3 bucket for the Terraform state."
+  value       = aws_s3_bucket.terraform_state.bucket
+}
+
+# Add to main.tf
+
+# Find the existing OIDC provider for GitHub in the AWS account.
+data "aws_iam_openid_connect_provider" "github" {
+  url = "https://token.actions.githubusercontent.com"
+}
+
+data "aws_iam_policy_document" "github_actions_trust_policy" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    effect  = "Allow"
+
+    principals {
+      type        = "Federated"
+      identifiers = [data.aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      # This line ensures ONLY your specific repo can use this role
+      values = ["repo:https://github.com/Lumin33r/readme-generator:ref:refs/heads/main"]
+    }
+  }
+}
+
+# This is a NEW role, separate from your Lambda and Bedrock roles.
+# Its only job is to give GitHub Actions permission to run 'terraform apply'.
+resource "aws_iam_role" "github_actions_role" {
+  name               = "GitHubActionsRole-ReadmeGenerator"
+  assume_role_policy = data.aws_iam_policy_document.github_actions_trust_policy.json
+}
+
+resource "aws_iam_role_policy_attachment" "github_actions_permissions" {
+  role = aws_iam_role.github_actions_role.name
+  # NOTE: In a production environment, you would create a custom, least-privilege policy.
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
+# Add this new output to your outputs.tf or main.tf
+output "github_actions_role_arn" {
+  description = "The ARN of the IAM role for GitHub Actions."
+  value       = aws_iam_role.github_actions_role.arn
 }
