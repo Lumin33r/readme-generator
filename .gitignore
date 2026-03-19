@@ -27,3 +27,4 @@ dist/
 *.exe
 *.zip
 *.tar.gz
+docs/outputs/
