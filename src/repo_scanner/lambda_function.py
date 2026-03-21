@@ -12,10 +12,11 @@ def list_files_in_repo(repo_url):
     try:
         print(f"Cloning repository: {repo_url}")
         subprocess.run(
-            ["git", "clone", repo_url, repo_dir],
+            ["git", "clone", "--depth=1", repo_url, repo_dir],
             check=True,
             capture_output=True,
-            text=True
+            text=True,
+            timeout=55
         )
         print("Repository cloned successfully.")
         file_list = []

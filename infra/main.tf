@@ -52,6 +52,11 @@ output "readme_bucket_name" {
   value       = module.s3_bucket.bucket_id
 }
 
+output "state_machine_arn" {
+  description = "The ARN of the ReadmeGeneratorPipeline Step Functions state machine."
+  value       = aws_sfn_state_machine.readme_generator.arn
+}
+
 # Add these new resources at the end of your file
 
 # main.tf
@@ -67,7 +72,7 @@ resource "aws_lambda_function" "repo_scanner_lambda" {
   filename         = data.archive_file.repo_scanner_zip.output_path
   handler          = "lambda_function.handler"
   runtime          = "python3.11"
-  timeout          = 30 # Increased timeout for cloning
+  timeout          = 60 # Increased for shallow-cloning large repos
   source_code_hash = data.archive_file.repo_scanner_zip.output_base64sha256
 
   # This line adds the 'git' command to our Lambda environment
@@ -184,74 +189,182 @@ module "final_compiler_agent" {
   EOT
 }
 
-# main.tf
+# =============================================================================
+# STEP FUNCTIONS ORCHESTRATION — replaces ReadmeGeneratorOrchestrator Lambda
+# =============================================================================
 
-# DEDICATED role for the Orchestrator Lambda
-module "orchestrator_execution_role" {
-  source             = "./modules/iam"
-  role_name          = "ReadmeGeneratorOrchestratorExecutionRole"
-  service_principals = ["lambda.amazonaws.com"]
-  policy_arns = [
-    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-  ]
+# --- AgentInvoker Lambda (streaming adapter for Bedrock Agent Runtime) ---
+
+data "archive_file" "agent_invoker_zip" {
+  type        = "zip"
+  source_dir  = "${path.root}/../src/agent_invoker"
+  output_path = "${path.root}/../dist/agent_invoker.zip"
 }
 
-# Orchestrator-specific permissions policy
-resource "aws_iam_policy" "orchestrator_permissions" {
-  name        = "ReadmeGeneratorOrchestratorPolicy"
-  description = "Allows Lambda to invoke Bedrock Agents and use the S3 bucket."
+resource "aws_iam_role" "agent_invoker_role" {
+  name = "ReadmeGeneratorAgentInvokerRole"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
 
+resource "aws_iam_role_policy_attachment" "agent_invoker_basic" {
+  role       = aws_iam_role.agent_invoker_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "agent_invoker_bedrock" {
+  name = "AgentInvokerBedrockPolicy"
+  role = aws_iam_role.agent_invoker_role.id
   policy = jsonencode({
-    Version = "2012-10-17",
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["bedrock:InvokeAgent", "bedrock-agent-runtime:InvokeAgent"]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_lambda_function" "agent_invoker" {
+  function_name    = "ReadmeGeneratorAgentInvoker"
+  role             = aws_iam_role.agent_invoker_role.arn
+  filename         = data.archive_file.agent_invoker_zip.output_path
+  source_code_hash = data.archive_file.agent_invoker_zip.output_base64sha256
+  handler          = "lambda_function.handler"
+  runtime          = "python3.11"
+  timeout          = 90
+}
+
+# --- Step Functions Execution Role ---
+
+resource "aws_iam_role" "sfn_execution_role" {
+  name = "ReadmeGeneratorSFNExecutionRole"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "states.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "sfn_execution_policy" {
+  name = "ReadmeGeneratorSFNPolicy"
+  role = aws_iam_role.sfn_execution_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
     Statement = [
       {
-        Sid = "BedrockAgentInvoke"
-        Action = [
-          "bedrock:InvokeAgent",
-          "bedrock-agent-runtime:InvokeAgent"
-        ]
+        Sid      = "InvokeAgentInvoker"
         Effect   = "Allow"
-        Resource = "*"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = aws_lambda_function.agent_invoker.arn
       },
       {
-        Sid = "S3BucketOperations"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:HeadObject"
-        ]
+        Sid      = "WriteOutputToS3"
         Effect   = "Allow"
+        Action   = ["s3:PutObject"]
         Resource = "${module.s3_bucket.bucket_arn}/*"
+      },
+      {
+        Sid    = "CloudWatchLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogDelivery",
+          "logs:GetLogDelivery",
+          "logs:UpdateLogDelivery",
+          "logs:DeleteLogDelivery",
+          "logs:ListLogDeliveries",
+          "logs:PutLogEvents",
+          "logs:PutResourcePolicy",
+          "logs:DescribeResourcePolicies",
+          "logs:DescribeLogGroups"
+        ]
+        Resource = "*"
       }
     ]
   })
 }
 
-# Attach the policy to the ORCHESTRATOR role (not the lambda_execution_role)
-resource "aws_iam_role_policy_attachment" "orchestrator_permissions_attach" {
-  role       = module.orchestrator_execution_role.role_name
-  policy_arn = aws_iam_policy.orchestrator_permissions.arn
+resource "aws_cloudwatch_log_group" "sfn_logs" {
+  name              = "/aws/states/ReadmeGeneratorPipeline"
+  retention_in_days = 14
 }
 
-# main.tf
+resource "aws_sfn_state_machine" "readme_generator" {
+  name     = "ReadmeGeneratorPipeline"
+  role_arn = aws_iam_role.sfn_execution_role.arn
+  type     = "EXPRESS"
 
-data "archive_file" "orchestrator_zip" {
+  definition = templatefile("${path.root}/../src/sfn/state_machine.asl.json", {
+    AgentInvokerFunctionArn = aws_lambda_function.agent_invoker.arn
+  })
+
+  logging_configuration {
+    log_destination        = "${aws_cloudwatch_log_group.sfn_logs.arn}:*"
+    include_execution_data = true
+    level                  = "ERROR"
+  }
+}
+
+# --- ParseS3Event Lambda (S3 → SFN bridge) ---
+
+data "archive_file" "parse_s3_event_zip" {
   type        = "zip"
-  source_dir  = "${path.root}/../src/orchestrator"
-  output_path = "${path.root}/../dist/orchestrator.zip"
+  source_dir  = "${path.root}/../src/parse_s3_event"
+  output_path = "${path.root}/../dist/parse_s3_event.zip"
 }
 
-resource "aws_lambda_function" "orchestrator_lambda" {
-  function_name    = "ReadmeGeneratorOrchestrator"
-  role             = module.orchestrator_execution_role.role_arn
-  filename         = data.archive_file.orchestrator_zip.output_path
+resource "aws_iam_role" "parse_s3_event_role" {
+  name = "ReadmeGeneratorParseS3EventRole"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "parse_s3_event_basic" {
+  role       = aws_iam_role.parse_s3_event_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "parse_s3_event_sfn" {
+  name = "ParseS3EventStartExecutionPolicy"
+  role = aws_iam_role.parse_s3_event_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "states:StartExecution"
+      Resource = aws_sfn_state_machine.readme_generator.arn
+    }]
+  })
+}
+
+resource "aws_lambda_function" "parse_s3_event" {
+  function_name    = "ReadmeGeneratorParseS3Event"
+  role             = aws_iam_role.parse_s3_event_role.arn
+  filename         = data.archive_file.parse_s3_event_zip.output_path
+  source_code_hash = data.archive_file.parse_s3_event_zip.output_base64sha256
   handler          = "lambda_function.handler"
   runtime          = "python3.11"
-  timeout          = 180
-  source_code_hash = data.archive_file.orchestrator_zip.output_base64sha256
+  timeout          = 10
 
   environment {
     variables = {
+      STATE_MACHINE_ARN                 = aws_sfn_state_machine.readme_generator.arn
+      OUTPUT_BUCKET                     = module.s3_bucket.bucket_id
       REPO_SCANNER_AGENT_ID             = module.repo_scanner_agent.agent_id
       REPO_SCANNER_AGENT_ALIAS_ID       = "TSTALIASID"
       PROJECT_SUMMARIZER_AGENT_ID       = module.project_summarizer_agent.agent_id
@@ -262,17 +375,14 @@ resource "aws_lambda_function" "orchestrator_lambda" {
       USAGE_EXAMPLES_AGENT_ALIAS_ID     = "TSTALIASID"
       FINAL_COMPILER_AGENT_ID           = module.final_compiler_agent.agent_id
       FINAL_COMPILER_AGENT_ALIAS_ID     = "TSTALIASID"
-      OUTPUT_BUCKET                     = module.s3_bucket.bucket_id
     }
   }
 }
 
-# main.tf
-
-resource "aws_lambda_permission" "allow_s3_to_invoke_orchestrator" {
-  statement_id  = "AllowS3ToInvokeOrchestratorLambda"
+resource "aws_lambda_permission" "allow_s3_to_invoke_parse" {
+  statement_id  = "AllowS3ToInvokeParseS3EventLambda"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.orchestrator_lambda.function_name
+  function_name = aws_lambda_function.parse_s3_event.function_name
   principal     = "s3.amazonaws.com"
   source_arn    = module.s3_bucket.bucket_arn
 }
@@ -281,12 +391,12 @@ resource "aws_s3_bucket_notification" "bucket_notification" {
   bucket = module.s3_bucket.bucket_id
 
   lambda_function {
-    lambda_function_arn = aws_lambda_function.orchestrator_lambda.arn
+    lambda_function_arn = aws_lambda_function.parse_s3_event.arn
     events              = ["s3:ObjectCreated:*"]
     filter_prefix       = "inputs/"
   }
 
-  depends_on = [aws_lambda_permission.allow_s3_to_invoke_orchestrator]
+  depends_on = [aws_lambda_permission.allow_s3_to_invoke_parse]
 }
 
 # Add to main.tf

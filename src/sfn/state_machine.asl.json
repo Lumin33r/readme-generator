@@ -1,0 +1,238 @@
+{
+  "Comment": "README Generator — parallel Bedrock agent pipeline",
+  "StartAt": "ScanRepo",
+  "States": {
+    "ScanRepo": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${AgentInvokerFunctionArn}",
+        "Payload": {
+          "agent_id.$": "$.agents.repo_scanner.id",
+          "alias_id.$": "$.agents.repo_scanner.alias",
+          "session_id.$": "$.session_id",
+          "input_text.$": "$.repo_url"
+        }
+      },
+      "ResultSelector": {
+        "file_list.$": "$.Payload.result"
+      },
+      "ResultPath": "$.scan_result",
+      "TimeoutSeconds": 90,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.TooManyRequestsException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "ScanFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "AnalyzeInParallel"
+    },
+
+    "AnalyzeInParallel": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "SummarizeProject",
+          "States": {
+            "SummarizeProject": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${AgentInvokerFunctionArn}",
+                "Payload": {
+                  "agent_id.$": "$.agents.project_summarizer.id",
+                  "alias_id.$": "$.agents.project_summarizer.alias",
+                  "session_id.$": "$.session_id",
+                  "input_text.$": "$.scan_result.file_list"
+                }
+              },
+              "ResultSelector": {
+                "project_summary.$": "$.Payload.result"
+              },
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException"],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "WriteInstallationGuide",
+          "States": {
+            "WriteInstallationGuide": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${AgentInvokerFunctionArn}",
+                "Payload": {
+                  "agent_id.$": "$.agents.installation_guide.id",
+                  "alias_id.$": "$.agents.installation_guide.alias",
+                  "session_id.$": "$.session_id",
+                  "input_text.$": "$.scan_result.file_list"
+                }
+              },
+              "ResultSelector": {
+                "installation_guide.$": "$.Payload.result"
+              },
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException"],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "WriteUsageExamples",
+          "States": {
+            "WriteUsageExamples": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${AgentInvokerFunctionArn}",
+                "Payload": {
+                  "agent_id.$": "$.agents.usage_examples.id",
+                  "alias_id.$": "$.agents.usage_examples.alias",
+                  "session_id.$": "$.session_id",
+                  "input_text.$": "$.scan_result.file_list"
+                }
+              },
+              "ResultSelector": {
+                "usage_examples.$": "$.Payload.result"
+              },
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException"],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.parallel_results",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "AnalysisFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "AssembleCompilerInput"
+    },
+
+    "AssembleCompilerInput": {
+      "Type": "Pass",
+      "Comment": "Reshapes parallel branch array into a named object for FinalCompiler. No Lambda, no cost.",
+      "Parameters": {
+        "repository_name.$": "$.repo_name",
+        "project_summary.$": "$.parallel_results[0].project_summary",
+        "installation_guide.$": "$.parallel_results[1].installation_guide",
+        "usage_examples.$": "$.parallel_results[2].usage_examples"
+      },
+      "ResultPath": "$.assembled.compiler_input",
+      "Next": "CompileReadme"
+    },
+
+    "CompileReadme": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${AgentInvokerFunctionArn}",
+        "Payload": {
+          "agent_id.$": "$.agents.final_compiler.id",
+          "alias_id.$": "$.agents.final_compiler.alias",
+          "session_id.$": "$.session_id",
+          "input_text.$": "States.JsonToString($.assembled.compiler_input)"
+        }
+      },
+      "ResultSelector": {
+        "readme_content.$": "$.Payload.result"
+      },
+      "ResultPath": "$.compile_result",
+      "TimeoutSeconds": 60,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "CompileFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "UploadReadme"
+    },
+
+    "UploadReadme": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Parameters": {
+        "Bucket.$": "$.output_bucket",
+        "Key.$": "$.output_key",
+        "Body.$": "$.compile_result.readme_content",
+        "ContentType": "text/markdown"
+      },
+      "TimeoutSeconds": 10,
+      "Retry": [
+        {
+          "ErrorEquals": ["S3.S3Exception"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "End": true
+    },
+
+    "ScanFailed": {
+      "Type": "Fail",
+      "Error": "ScanRepoFailed",
+      "Cause": "RepoScannerAgent returned an error after retries. Check /aws/lambda/ReadmeGeneratorAgentInvoker and /aws/lambda/RepoScannerTool logs."
+    },
+    "AnalysisFailed": {
+      "Type": "Fail",
+      "Error": "AnalysisParallelFailed",
+      "Cause": "One or more parallel analysis agents failed. Check /aws/lambda/ReadmeGeneratorAgentInvoker logs."
+    },
+    "CompileFailed": {
+      "Type": "Fail",
+      "Error": "FinalCompilerFailed",
+      "Cause": "FinalCompilerAgent failed to generate README. Check /aws/lambda/ReadmeGeneratorAgentInvoker logs."
+    }
+  }
+}

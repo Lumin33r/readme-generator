@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INFRA_DIR="$SCRIPT_DIR/infra"
 OUTPUT_DIR="$SCRIPT_DIR/docs/outputs"
 POLL_INTERVAL=10
-TIMEOUT=180
+TIMEOUT=300
 
 # ---------------------------------------------------------------------------
 # Resolve bucket name from Terraform output
@@ -109,6 +109,14 @@ done
 echo ""
 echo "Timeout: README was not generated within ${TIMEOUT}s." >&2
 echo ""
+SFN_ARN=$(terraform -chdir="$INFRA_DIR" output -raw state_machine_arn 2>/dev/null || true)
 echo "Debug with:"
-echo "  aws logs tail /aws/lambda/ReadmeGeneratorOrchestrator --since 5m --region us-west-2"
+echo "  # ParseS3Event Lambda (S3 trigger -> SFN bridge):"
+echo "  aws logs tail /aws/lambda/ReadmeGeneratorParseS3Event --since 5m --region us-west-2"
+echo "  # AgentInvoker Lambda (Bedrock streaming adapter):"
+echo "  aws logs tail /aws/lambda/ReadmeGeneratorAgentInvoker --since 5m --region us-west-2"
+if [[ -n "$SFN_ARN" ]]; then
+  echo "  # Step Functions execution history:"
+  echo "  aws stepfunctions list-executions --state-machine-arn $SFN_ARN --region us-west-2 --max-results 5"
+fi
 exit 1
