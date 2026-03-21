@@ -47,6 +47,13 @@ def handler(event, context):
 
     repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
 
+    # Propagate a stable trace_id so all AgentInvoker spans for this execution
+    # can be correlated in Tempo using sfn.trace_id = trace_context.trace_id.
+    trace_context = {
+        "trace_id": context.aws_request_id,
+        "span_id": "",
+    }
+
     sfn.start_execution(
         stateMachineArn=STATE_MACHINE_ARN,
         name=f"{repo_name}-{context.aws_request_id}",
@@ -58,6 +65,7 @@ def handler(event, context):
                 "output_bucket": OUTPUT_BUCKET,
                 "session_id": context.aws_request_id,
                 "agents": AGENTS,
+                "trace_context": trace_context,
             }
         ),
     )

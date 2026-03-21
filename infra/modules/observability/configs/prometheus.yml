@@ -1,0 +1,38 @@
+# Prometheus scrape config — rendered by Terraform templatefile().
+# Template variables: aws_region
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: readme-generator
+    region: ${aws_region}
+
+# Remote-write receiver (accepts pushes from OTEL Collector)
+remote_write_receiver: {}
+
+scrape_configs:
+  # Prometheus self-metrics
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # OTEL Collector internal metrics (gRPC / HTTP pipeline diagnostics)
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector.obs.local:8888"]
+
+  # Grafana health metrics
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana.obs.local:3000"]
+
+  # Loki self-metrics
+  - job_name: loki
+    static_configs:
+      - targets: ["loki.obs.local:3100"]
+
+  # Tempo self-metrics
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo.obs.local:3200"]

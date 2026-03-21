@@ -6,12 +6,16 @@ on:
       - main
 
 permissions:
-  id-token: write # This is required for OIDC authentication
+  id-token: write  # Required for OIDC authentication
   contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -24,6 +28,8 @@ jobs:
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
 
       - name: Terraform Init
         run: terraform init
@@ -34,13 +40,21 @@ jobs:
       - name: Terraform Apply
         run: terraform apply -auto-approve
 
-      - name: Run AI Workflow
+      - name: Trigger pipeline for current repository
+        # URL encoding matches generate.sh: https://github.com/owner/repo -> https---github.com-owner-repo
         run: |
-          echo "Triggering AI README Generation..."
-          BUCKET_NAME=$(terraform output -raw readme_bucket_name)
+          BUCKET=$(terraform output -raw readme_bucket_name)
           REPO_URL="https://github.com/${{ github.repository }}"
-          FILENAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote_plus('${REPO_URL}'))")
-          touch ${FILENAME}
-          aws s3 cp ${FILENAME} s3://${BUCKET_NAME}/inputs/${FILENAME}
-          rm ${FILENAME}
-          echo "Workflow triggered for ${REPO_URL}."
+          ENCODED=$(echo "$REPO_URL" | sed 's|://|---|; s|/|-|g')
+          aws s3 cp /dev/null "s3://${BUCKET}/inputs/${ENCODED}"
+          echo "Pipeline triggered for ${REPO_URL} (key: inputs/${ENCODED})"
+
+      - name: Export Terraform outputs
+        id: tf_outputs
+        run: |
+          echo "readme_bucket_name=$(terraform output -raw readme_bucket_name)" >> "$GITHUB_OUTPUT"
+          echo "state_machine_arn=$(terraform output -raw state_machine_arn)"   >> "$GITHUB_OUTPUT"
+
+    outputs:
+      readme_bucket_name: ${{ steps.tf_outputs.outputs.readme_bucket_name }}
+      state_machine_arn:  ${{ steps.tf_outputs.outputs.state_machine_arn }}

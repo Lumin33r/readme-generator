@@ -1,0 +1,5 @@
+{
+  "required_sections": ["Installation", "Usage"],
+  "forbidden_phrases": ["I am an AI", "I cannot", "As an AI", "I'm an AI"],
+  "min_length_chars": 500
+}

@@ -11,6 +11,7 @@ __pycache__/
 .terraform/
 *.tfstate
 *.tfstate.*.backup
+*.tfplan
 
 # Build artifacts
 # We generate this zip file, so we don't need to store it in git

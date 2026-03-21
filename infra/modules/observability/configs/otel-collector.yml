@@ -1,0 +1,99 @@
+# OTEL Collector configuration — rendered by Terraform templatefile().
+# Template variables: tempo_endpoint, loki_endpoint, aws_region,
+# agent_invoker_log_group, parse_s3_event_log_group,
+# repo_scanner_log_group, sfn_log_group
+
+receivers:
+  # Receives OTLP spans/metrics from Lambda functions via HTTP (port 4318)
+  otlp:
+    protocols:
+      http:
+        endpoint: "0.0.0.0:4318"
+      grpc:
+        endpoint: "0.0.0.0:4317"
+
+  # Pull Lambda and SFN metrics from CloudWatch
+  awscloudwatch:
+    region: ${aws_region}
+    poll_interval: 1m
+    named_profile: ""
+    imds_retries: 1
+    metrics:
+      names:
+        - "AWS/Lambda"
+        - "AWS/States"
+      dimensions_filters:
+        FunctionName:
+          - "ReadmeGeneratorAgentInvoker"
+          - "ReadmeGeneratorParseS3Event"
+          - "RepoScannerTool"
+
+processors:
+  # Batch spans before sending to Tempo
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+  # Resource attributes for Grafana Explore trace-to-log linking
+  resource:
+    attributes:
+      - key: service.name
+        from_attribute: service.name
+        action: insert
+
+  # Drop heartbeat/health-check spans to reduce noise
+  filter/drop_health:
+    spans:
+      exclude:
+        match_type: strict
+        attributes:
+          - key: http.target
+            value: "/health"
+
+exporters:
+  # Traces → Tempo (OTLP gRPC)
+  otlp/tempo:
+    endpoint: "${tempo_endpoint}"
+    tls:
+      insecure: true
+
+  # Metrics → Prometheus (remote-write)
+  prometheusremotewrite:
+    endpoint: "http://${prometheus_endpoint}/api/v1/write"
+    tls:
+      insecure_skip_verify: true
+
+  # Logs → Loki
+  loki:
+    endpoint: "http://${loki_endpoint}/loki/api/v1/push"
+    default_labels_enabled:
+      exporter: false
+      job: true
+
+  # Debug logging to stdout (visible in ECS logs)
+  debug:
+    verbosity: normal
+
+extensions:
+  health_check:
+    endpoint: "0.0.0.0:13133"
+  pprof:
+    endpoint: "0.0.0.0:1777"
+  zpages:
+    endpoint: "0.0.0.0:55679"
+
+service:
+  extensions: [health_check, pprof, zpages]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [resource, filter/drop_health, batch]
+      exporters: [otlp/tempo, debug]
+    metrics:
+      receivers: [otlp, awscloudwatch]
+      processors: [batch]
+      exporters: [prometheusremotewrite, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [loki, debug]

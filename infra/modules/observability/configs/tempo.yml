@@ -1,0 +1,65 @@
+# Tempo configuration — rendered by Terraform templatefile().
+# Template variables: aws_region, s3_bucket_name, prometheus_endpoint
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+ingester:
+  max_block_bytes: 1_000_000
+  max_block_duration: 5m
+  trace_idle_period: 10s
+
+compactor:
+  compaction:
+    block_retention: ${tempo_retention}h
+
+storage:
+  trace:
+    backend: s3
+    s3:
+      bucket: ${s3_bucket_name}
+      prefix: obs/tempo
+      region: ${aws_region}
+      forcepathstyle: false
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      cluster: readme-generator
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://${prometheus_endpoint}/api/v1/write
+        send_exemplars: true
+  processors:
+    - service-graphs
+    - span-metrics
+
+querier:
+  frontend_worker:
+    frontend_address: localhost:9095
+
+query_frontend:
+  search:
+    max_duration: 0s
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics]

@@ -1,15 +1,75 @@
-# Observability — AI README.md Generator
+# Observability Master Plan — README Generator
 
-## Logging
+> **Status:** Post-SFN refactor. Replaces the single-Lambda observability model.
+> This document is the index. See sibling docs for full detail on each layer.
 
-All observability comes through **Amazon CloudWatch Logs**, which Lambda writes to automatically via the `AWSLambdaBasicExecutionRole` policy.
+## Signal Taxonomy
 
-### Log Groups
+| Signal Type              | Source                                                | Destination              | Captured By              |
+| ------------------------ | ----------------------------------------------------- | ------------------------ | ------------------------ |
+| **Lambda metrics**       | CloudWatch Metrics (automatic)                        | Grafana → CW datasource  | Always-on                |
+| **SFN execution events** | CloudWatch Logs `/aws/states/ReadmeGeneratorPipeline` | Loki                     | Always-on                |
+| **Lambda logs**          | CloudWatch Logs `/aws/lambda/*`                       | Loki (CW exporter)       | Always-on                |
+| **OTEL traces**          | `AgentInvoker` Lambda via OTEL SDK                    | Tempo                    | Requires instrumentation |
+| **LLM span attributes**  | `AgentInvoker` (token count, cost, hashes)            | Tempo + Prometheus       | Requires instrumentation |
+| **Eval scores**          | Post-execution eval Lambda or CI/CD suite             | Tempo (inline) + S3 (CI) | See eval doc             |
 
-| Log Group                                 | Source              | Key Events                                                |
-| ----------------------------------------- | ------------------- | --------------------------------------------------------- |
-| `/aws/lambda/RepoScannerTool`             | Repo Scanner Lambda | Clone success/failure, file count                         |
-| `/aws/lambda/ReadmeGeneratorOrchestrator` | Orchestrator Lambda | Full event payload, each agent response, S3 upload result |
+## Component Log Groups (Post-SFN)
+
+| Log Group                                 | Source                    | Retention                   |
+| ----------------------------------------- | ------------------------- | --------------------------- |
+| `/aws/states/ReadmeGeneratorPipeline`     | SFN Express Workflow      | 14 days (Terraform-managed) |
+| `/aws/lambda/ReadmeGeneratorParseS3Event` | S3→SFN bridge             | 14 days                     |
+| `/aws/lambda/ReadmeGeneratorAgentInvoker` | Bedrock streaming adapter | 14 days                     |
+| `/aws/lambda/RepoScannerTool`             | Bedrock action group      | 14 days                     |
+
+## Related Documents
+
+- [otel-instrumentation.md](otel-instrumentation.md) — Span design for AgentInvoker, attributes, token tracking
+- [eval-strategy.md](eval-strategy.md) — CI/CD vs live eval layers, per-agent scoring
+- [architecture-diagram.md](architecture-diagram.md) — Mermaid diagrams: context, trace hierarchy, CI/CD flow
+- [terraform-module-plan.md](terraform-module-plan.md) — Full Grafana stack module structure and HCL skeleton
+
+---
+
+## Quick Debug Reference (Post-SFN)
+
+### 1. Did ParseS3Event fire?
+
+```bash
+aws logs tail /aws/lambda/ReadmeGeneratorParseS3Event --since 10m --region us-west-2
+```
+
+### 2. Did the SFN execution start and what state did it fail in?
+
+```bash
+SFN_ARN=$(cd infra && terraform output -raw state_machine_arn)
+aws stepfunctions list-executions \
+  --state-machine-arn "$SFN_ARN" \
+  --region us-west-2 --max-results 5
+# Then inspect a specific execution:
+aws stepfunctions get-execution-history \
+  --execution-arn <arn> --region us-west-2
+```
+
+### 3. Which agent invocation failed?
+
+```bash
+aws logs tail /aws/lambda/ReadmeGeneratorAgentInvoker --since 10m --region us-west-2
+```
+
+### 4. Did the Repo Scanner timeout?
+
+```bash
+aws logs tail /aws/lambda/RepoScannerTool --since 10m --region us-west-2
+```
+
+### 5. Was the README uploaded?
+
+```bash
+BUCKET=$(cd infra && terraform output -raw readme_bucket_name)
+aws s3 ls "s3://$BUCKET/outputs/" --recursive
+```
 
 ### Orchestrator Debug Statements
 

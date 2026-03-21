@@ -8,6 +8,14 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.5"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.2"
+    }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
   }
 }
 
@@ -19,6 +27,63 @@ resource "random_string" "suffix" {
   length  = 8
   special = false
   upper   = false
+}
+
+# ---------------------------------------------------------------------------
+# VPC — use the account's default VPC; no new network resources required.
+# All subnets in the default VPC are public, so assign_public_ip must be true
+# for ECS Fargate tasks to pull images and the Lambda to reach the internet.
+# ---------------------------------------------------------------------------
+
+data "aws_vpc" "default" {
+  default = true
+}
+
+# The default route (0.0.0.0/0 → IGW) was removed from the main route table.
+# Restore it so ECS tasks can reach Secrets Manager, DockerHub, and other
+# internet endpoints needed for Fargate to start containers.
+data "aws_route_table" "main" {
+  vpc_id = data.aws_vpc.default.id
+  filter {
+    name   = "association.main"
+    values = ["true"]
+  }
+}
+
+data "aws_internet_gateway" "default" {
+  filter {
+    name   = "attachment.vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
+resource "aws_route" "default_internet" {
+  route_table_id         = data.aws_route_table.main.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = data.aws_internet_gateway.default.id
+}
+
+# Discover the one existing subnet in the default VPC.
+# The default VPC has a single /16 subnet (172.31.0.0/16) in us-west-2c;
+# address space is exhausted so no additional default subnets can be created.
+# The NLBs (both OTEL and Grafana) and ECS tasks all run in this subnet.
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
+locals {
+  default_subnet_ids = data.aws_subnets.default.ids
+}
+
+# Generate a secure Grafana admin password automatically.
+# Retrieve after apply: aws secretsmanager get-secret-value --secret-id readme-generator/obs/grafana-admin
+resource "random_password" "grafana_admin" {
+  length           = 20
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>?"
 }
 
 module "s3_bucket" {
@@ -195,9 +260,35 @@ module "final_compiler_agent" {
 
 # --- AgentInvoker Lambda (streaming adapter for Bedrock Agent Runtime) ---
 
+# Install OTEL dependencies into a clean build directory so the Lambda zip
+# includes them without polluting src/agent_invoker/ with installed packages.
+locals {
+  agent_invoker_src   = "${abspath(path.root)}/../src/agent_invoker"
+  agent_invoker_build = "${abspath(path.root)}/../dist/agent_invoker_build"
+}
+
+resource "null_resource" "agent_invoker_build" {
+  triggers = {
+    requirements = filesha256("${local.agent_invoker_src}/requirements.txt")
+    source       = filesha256("${local.agent_invoker_src}/lambda_function.py")
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/sh", "-ec"]
+    command     = <<-CMD
+      rm -rf "${local.agent_invoker_build}"
+      mkdir -p "${local.agent_invoker_build}"
+      pip install -r "${local.agent_invoker_src}/requirements.txt" \
+        -t "${local.agent_invoker_build}" --quiet
+      cp "${local.agent_invoker_src}/lambda_function.py" "${local.agent_invoker_build}/"
+    CMD
+  }
+}
+
 data "archive_file" "agent_invoker_zip" {
+  depends_on  = [null_resource.agent_invoker_build]
   type        = "zip"
-  source_dir  = "${path.root}/../src/agent_invoker"
+  source_dir  = local.agent_invoker_build
   output_path = "${path.root}/../dist/agent_invoker.zip"
 }
 
@@ -231,6 +322,29 @@ resource "aws_iam_role_policy" "agent_invoker_bedrock" {
   })
 }
 
+# Allow the Lambda to create ENIs so it can run inside the VPC and reach the
+# OTEL Collector NLB over a private IP address.
+resource "aws_iam_role_policy_attachment" "agent_invoker_vpc" {
+  role       = aws_iam_role.agent_invoker_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+# Security group for the Agent Invoker Lambda.
+# No inbound rules needed; the Lambda only initiates outbound connections.
+resource "aws_security_group" "agent_invoker_lambda" {
+  name        = "ReadmeGeneratorAgentInvokerSG"
+  description = "Agent Invoker Lambda - egress to OTEL Collector NLB and Bedrock"
+  vpc_id      = data.aws_vpc.default.id
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
 resource "aws_lambda_function" "agent_invoker" {
   function_name    = "ReadmeGeneratorAgentInvoker"
   role             = aws_iam_role.agent_invoker_role.arn
@@ -239,6 +353,26 @@ resource "aws_lambda_function" "agent_invoker" {
   handler          = "lambda_function.handler"
   runtime          = "python3.11"
   timeout          = 90
+
+  # Place the Lambda in the default VPC so it can reach the OTEL Collector
+  # NLB via a private IP address.  Subnets are public (default VPC only has
+  # public subnets), so the Lambda still has internet access for Bedrock.
+  vpc_config {
+    subnet_ids         = local.default_subnet_ids
+    security_group_ids = [aws_security_group.agent_invoker_lambda.id]
+  }
+
+  environment {
+    variables = {
+      OTEL_EXPORTER_OTLP_ENDPOINT = module.observability.otel_collector_endpoint
+      OTEL_SERVICE_NAME           = "readme-generator-agent-invoker"
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.agent_invoker_logs,
+    aws_iam_role_policy_attachment.agent_invoker_vpc,
+  ]
 }
 
 # --- Step Functions Execution Role ---
@@ -298,6 +432,16 @@ resource "aws_cloudwatch_log_group" "sfn_logs" {
   retention_in_days = 14
 }
 
+resource "aws_cloudwatch_log_group" "agent_invoker_logs" {
+  name              = "/aws/lambda/ReadmeGeneratorAgentInvoker"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "parse_s3_event_logs" {
+  name              = "/aws/lambda/ReadmeGeneratorParseS3Event"
+  retention_in_days = 14
+}
+
 resource "aws_sfn_state_machine" "readme_generator" {
   name     = "ReadmeGeneratorPipeline"
   role_arn = aws_iam_role.sfn_execution_role.arn
@@ -310,7 +454,7 @@ resource "aws_sfn_state_machine" "readme_generator" {
   logging_configuration {
     log_destination        = "${aws_cloudwatch_log_group.sfn_logs.arn}:*"
     include_execution_data = true
-    level                  = "ERROR"
+    level                  = "ALL" # ALL required for test_all_states_entered in eval suite
   }
 }
 
@@ -399,6 +543,27 @@ resource "aws_s3_bucket_notification" "bucket_notification" {
   depends_on = [aws_lambda_permission.allow_s3_to_invoke_parse]
 }
 
+# S3 lifecycle rules for observability data written by Loki and Tempo.
+# These rules are activated once the observability module is deployed and
+# the services begin writing to obs/loki/ and obs/tempo/ prefixes.
+resource "aws_s3_bucket_lifecycle_configuration" "obs_retention" {
+  bucket = module.s3_bucket.bucket_id
+
+  rule {
+    id     = "loki-retention"
+    status = "Enabled"
+    filter { prefix = "obs/loki/" }
+    expiration { days = 30 }
+  }
+
+  rule {
+    id     = "tempo-retention"
+    status = "Enabled"
+    filter { prefix = "obs/tempo/" }
+    expiration { days = 14 }
+  }
+}
+
 # Add to main.tf
 
 # --- NEW RESOURCES FOR CI/CD PIPELINE ---
@@ -472,4 +637,44 @@ resource "aws_iam_role_policy_attachment" "github_actions_permissions" {
 output "github_actions_role_arn" {
   description = "The ARN of the IAM role for GitHub Actions."
   value       = aws_iam_role.github_actions_role.arn
+}
+
+# =============================================================================
+# OBSERVABILITY MODULE
+# Grafana + Prometheus + Loki + Tempo + OTEL Collector on ECS Fargate.
+# Uses the default VPC; both private_subnet_ids and public_subnet_ids receive
+# the same public subnet list because the default VPC has no private subnets.
+# assign_public_ip = true lets ECS tasks pull images without a NAT gateway.
+# =============================================================================
+
+module "observability" {
+  source = "./modules/observability"
+
+  name_prefix = "readme-generator"
+  aws_region  = "us-west-2"
+
+  vpc_id             = data.aws_vpc.default.id
+  private_subnet_ids = local.default_subnet_ids
+  public_subnet_ids  = local.default_subnet_ids
+  assign_public_ip   = true # Required: default VPC subnets are public only
+
+  shared_s3_bucket_id  = module.s3_bucket.bucket_id
+  shared_s3_bucket_arn = module.s3_bucket.bucket_arn
+
+  grafana_admin_password = random_password.grafana_admin.result
+
+  tags = {
+    Project   = "readme-generator"
+    ManagedBy = "terraform"
+  }
+}
+
+output "grafana_url" {
+  description = "URL of the Grafana dashboard."
+  value       = module.observability.grafana_url
+}
+
+output "otel_collector_endpoint" {
+  description = "OTLP HTTP endpoint for the OTEL Collector NLB (used by Lambda)."
+  value       = module.observability.otel_collector_endpoint
 }

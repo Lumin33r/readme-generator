@@ -1,0 +1,61 @@
+# Loki configuration — rendered by Terraform templatefile().
+# Template variables: aws_region, s3_bucket_name
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    s3:
+      bucketnames: ${s3_bucket_name}
+      region: ${aws_region}
+      s3forcepathstyle: false
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: obs/loki/index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+  aws:
+    s3: s3://${aws_region}/${s3_bucket_name}
+    s3forcepathstyle: false
+
+limits_config:
+  ingestion_rate_mb: 4
+  ingestion_burst_size_mb: 6
+  # Retention is enforced by the S3 lifecycle rule, not Loki's compactor.
+  retention_period: 0s
+
+compactor:
+  working_directory: /loki/retention
+  compaction_interval: 10m
+  retention_enabled: false
+
+ruler:
+  alertmanager_url: http://localhost:9093
