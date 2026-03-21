@@ -18,7 +18,7 @@
         "file_list.$": "$.Payload.result"
       },
       "ResultPath": "$.scan_result",
-      "TimeoutSeconds": 90,
+      "TimeoutSeconds": 300,
       "Retry": [
         {
           "ErrorEquals": [
@@ -63,7 +63,7 @@
               "ResultSelector": {
                 "project_summary.$": "$.Payload.result"
               },
-              "TimeoutSeconds": 60,
+              "TimeoutSeconds": 300,
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException"],
@@ -94,7 +94,7 @@
               "ResultSelector": {
                 "installation_guide.$": "$.Payload.result"
               },
-              "TimeoutSeconds": 60,
+              "TimeoutSeconds": 300,
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException"],
@@ -125,7 +125,7 @@
               "ResultSelector": {
                 "usage_examples.$": "$.Payload.result"
               },
-              "TimeoutSeconds": 60,
+              "TimeoutSeconds": 300,
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException"],
@@ -179,7 +179,7 @@
         "readme_content.$": "$.Payload.result"
       },
       "ResultPath": "$.compile_result",
-      "TimeoutSeconds": 60,
+      "TimeoutSeconds": 300,
       "Retry": [
         {
           "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException"],

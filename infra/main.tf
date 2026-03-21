@@ -329,6 +329,32 @@ resource "aws_iam_role_policy_attachment" "agent_invoker_vpc" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
+# VPC Interface Endpoint for Bedrock Agent Runtime.
+# Lambda in VPC has no public IP so cannot reach AWS services over the internet.
+# This endpoint allows private connectivity to bedrock-agent-runtime.
+resource "aws_security_group" "bedrock_endpoint" {
+  name        = "ReadmeGeneratorBedrockEndpointSG"
+  description = "Allow HTTPS from Lambda to Bedrock VPC endpoint"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description     = "HTTPS from Agent Invoker Lambda"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.agent_invoker_lambda.id]
+  }
+}
+
+resource "aws_vpc_endpoint" "bedrock_agent_runtime" {
+  vpc_id              = data.aws_vpc.default.id
+  service_name        = "com.amazonaws.us-west-2.bedrock-agent-runtime"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = local.default_subnet_ids
+  security_group_ids  = [aws_security_group.bedrock_endpoint.id]
+  private_dns_enabled = true
+}
+
 # Security group for the Agent Invoker Lambda.
 # No inbound rules needed; the Lambda only initiates outbound connections.
 resource "aws_security_group" "agent_invoker_lambda" {
@@ -352,7 +378,7 @@ resource "aws_lambda_function" "agent_invoker" {
   source_code_hash = data.archive_file.agent_invoker_zip.output_base64sha256
   handler          = "lambda_function.handler"
   runtime          = "python3.11"
-  timeout          = 90
+  timeout          = 300
 
   # Place the Lambda in the default VPC so it can reach the OTEL Collector
   # NLB via a private IP address.  Subnets are public (default VPC only has
@@ -678,3 +704,144 @@ output "otel_collector_endpoint" {
   description = "OTLP HTTP endpoint for the OTEL Collector NLB (used by Lambda)."
   value       = module.observability.otel_collector_endpoint
 }
+
+# ---------------------------------------------------------------------------
+# CloudWatch → Loki forwarder Lambda
+# Receives CW Logs subscription filter events and pushes them to Loki's HTTP
+# push API.  Runs inside the default VPC to reach loki.obs.local:3100.
+# ---------------------------------------------------------------------------
+
+data "archive_file" "cw_to_loki_zip" {
+  type        = "zip"
+  source_dir  = "${path.root}/../src/cw_to_loki"
+  output_path = "${path.root}/../dist/cw_to_loki.zip"
+}
+
+resource "aws_iam_role" "cw_to_loki_role" {
+  name = "ReadmeGeneratorCWToLokiRole"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "cw_to_loki_basic" {
+  role       = aws_iam_role.cw_to_loki_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "cw_to_loki_vpc" {
+  role       = aws_iam_role.cw_to_loki_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+resource "aws_security_group" "cw_to_loki" {
+  name        = "ReadmeGeneratorCWToLokiSG"
+  description = "CW-to-Loki forwarder Lambda egress to Loki on port 3100"
+  vpc_id      = data.aws_vpc.default.id
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Allow the forwarder Lambda to reach Loki tasks on port 3100
+resource "aws_security_group_rule" "loki_from_forwarder" {
+  type                     = "ingress"
+  description              = "Loki HTTP push from CW forwarder Lambda"
+  from_port                = 3100
+  to_port                  = 3100
+  protocol                 = "tcp"
+  security_group_id        = module.observability.obs_internal_sg_id
+  source_security_group_id = aws_security_group.cw_to_loki.id
+}
+
+resource "aws_cloudwatch_log_group" "cw_to_loki_logs" {
+  name              = "/aws/lambda/ReadmeGeneratorCWToLoki"
+  retention_in_days = 7
+}
+
+resource "aws_lambda_function" "cw_to_loki" {
+  function_name    = "ReadmeGeneratorCWToLoki"
+  role             = aws_iam_role.cw_to_loki_role.arn
+  filename         = data.archive_file.cw_to_loki_zip.output_path
+  source_code_hash = data.archive_file.cw_to_loki_zip.output_base64sha256
+  handler          = "lambda_function.handler"
+  runtime          = "python3.11"
+  timeout          = 30
+
+  vpc_config {
+    subnet_ids         = local.default_subnet_ids
+    security_group_ids = [aws_security_group.cw_to_loki.id]
+  }
+
+  environment {
+    variables = {
+      LOKI_PUSH_URL = module.observability.loki_push_url
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.cw_to_loki_logs,
+    aws_iam_role_policy_attachment.cw_to_loki_vpc,
+  ]
+}
+
+# Allow CloudWatch Logs service to invoke the forwarder Lambda
+resource "aws_lambda_permission" "cw_invoke_forwarder_agent_invoker" {
+  statement_id  = "AllowCWLogsAgentInvoker"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.cw_to_loki.function_name
+  principal     = "logs.amazonaws.com"
+  source_arn    = "${aws_cloudwatch_log_group.agent_invoker_logs.arn}:*"
+}
+
+resource "aws_lambda_permission" "cw_invoke_forwarder_sfn" {
+  statement_id  = "AllowCWLogsSFN"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.cw_to_loki.function_name
+  principal     = "logs.amazonaws.com"
+  source_arn    = "${aws_cloudwatch_log_group.sfn_logs.arn}:*"
+}
+
+resource "aws_lambda_permission" "cw_invoke_forwarder_parse_s3" {
+  statement_id  = "AllowCWLogsParseS3Event"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.cw_to_loki.function_name
+  principal     = "logs.amazonaws.com"
+  source_arn    = "${aws_cloudwatch_log_group.parse_s3_event_logs.arn}:*"
+}
+
+# Subscription filters — push each log group to the forwarder Lambda
+resource "aws_cloudwatch_log_subscription_filter" "agent_invoker_to_loki" {
+  name            = "readme-generator-agent-invoker-to-loki"
+  log_group_name  = aws_cloudwatch_log_group.agent_invoker_logs.name
+  filter_pattern  = ""
+  destination_arn = aws_lambda_function.cw_to_loki.arn
+  depends_on      = [aws_lambda_permission.cw_invoke_forwarder_agent_invoker]
+}
+
+resource "aws_cloudwatch_log_subscription_filter" "sfn_to_loki" {
+  name            = "readme-generator-sfn-to-loki"
+  log_group_name  = aws_cloudwatch_log_group.sfn_logs.name
+  filter_pattern  = ""
+  destination_arn = aws_lambda_function.cw_to_loki.arn
+  depends_on      = [aws_lambda_permission.cw_invoke_forwarder_sfn]
+}
+
+resource "aws_cloudwatch_log_subscription_filter" "parse_s3_event_to_loki" {
+  name            = "readme-generator-parse-s3-event-to-loki"
+  log_group_name  = aws_cloudwatch_log_group.parse_s3_event_logs.name
+  filter_pattern  = ""
+  destination_arn = aws_lambda_function.cw_to_loki.arn
+  depends_on      = [aws_lambda_permission.cw_invoke_forwarder_parse_s3]
+}
+

@@ -17,3 +17,13 @@ output "ecs_cluster_arn" {
   description = "ARN of the ECS observability cluster."
   value       = aws_ecs_cluster.obs.arn
 }
+
+output "loki_push_url" {
+  description = "Loki HTTP push endpoint (VPC-internal via Cloud Map)."
+  value       = "http://${aws_service_discovery_service.loki.name}.${aws_service_discovery_private_dns_namespace.obs.name}:3100/loki/api/v1/push"
+}
+
+output "obs_internal_sg_id" {
+  description = "Security group shared by all observability ECS tasks (used to allow Lambda ingress to Loki)."
+  value       = aws_security_group.obs_internal.id
+}
