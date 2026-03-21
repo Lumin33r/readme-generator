@@ -29,9 +29,9 @@ storage:
     backend: s3
     s3:
       bucket: ${s3_bucket_name}
-      prefix: obs/tempo
+      endpoint: s3.${aws_region}.amazonaws.com
       region: ${aws_region}
-      forcepathstyle: false
+      insecure: false
     wal:
       path: /var/tempo/wal
     local:
@@ -47,9 +47,9 @@ metrics_generator:
     remote_write:
       - url: http://${prometheus_endpoint}/api/v1/write
         send_exemplars: true
-  processors:
-    - service-graphs
-    - span-metrics
+  processor:
+    service_graphs: {}
+    span_metrics: {}
 
 querier:
   frontend_worker:

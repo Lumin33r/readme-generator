@@ -24,11 +24,17 @@ locals {
 
   # Rendered configs (Terraform-time substitution)
   otel_config = base64encode(templatefile("${path.module}/configs/otel-collector.yml", {
-    aws_region          = var.aws_region
     tempo_endpoint      = "${local.tempo_host}:4317"
     prometheus_endpoint = "${local.prometheus_host}:9090"
     loki_endpoint       = local.loki_host
   }))
+
+  # Raw (non-base64) OTEL config for --config env:VAR usage in distroless image
+  otel_config_raw = templatefile("${path.module}/configs/otel-collector.yml", {
+    tempo_endpoint      = "${local.tempo_host}:4317"
+    prometheus_endpoint = "${local.prometheus_host}:9090"
+    loki_endpoint       = local.loki_host
+  })
 
   prometheus_config = base64encode(templatefile("${path.module}/configs/prometheus.yml", {
     aws_region = var.aws_region
@@ -431,13 +437,11 @@ resource "aws_ecs_task_definition" "otel" {
     image     = var.otel_collector_image
     essential = true
 
-    command = [
-      "/bin/sh", "-c",
-      "echo $OTEL_CONFIG_B64 | base64 -d > /tmp/otel-config.yml && /otelcol-contrib --config /tmp/otel-config.yml"
-    ]
+    entryPoint = null
+    command    = ["--config", "env:OTEL_CONFIG"]
 
     environment = [
-      { name = "OTEL_CONFIG_B64", value = local.otel_config }
+      { name = "OTEL_CONFIG", value = local.otel_config_raw }
     ]
 
     portMappings = [
@@ -473,8 +477,8 @@ resource "aws_ecs_task_definition" "prometheus" {
     image     = var.prometheus_image
     essential = true
 
+    entryPoint = ["/bin/sh", "-c"]
     command = [
-      "/bin/sh", "-c",
       "echo $PROMETHEUS_CONFIG_B64 | base64 -d > /tmp/prometheus.yml && /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --web.enable-remote-write-receiver --storage.tsdb.retention.time=${var.prometheus_retention}"
     ]
 
@@ -510,8 +514,8 @@ resource "aws_ecs_task_definition" "loki" {
     image     = var.loki_image
     essential = true
 
+    entryPoint = ["/bin/sh", "-c"]
     command = [
-      "/bin/sh", "-c",
       "echo $LOKI_CONFIG_B64 | base64 -d > /tmp/loki.yml && /usr/bin/loki -config.file=/tmp/loki.yml"
     ]
 
@@ -550,8 +554,8 @@ resource "aws_ecs_task_definition" "tempo" {
     image     = var.tempo_image
     essential = true
 
+    entryPoint = ["/bin/sh", "-c"]
     command = [
-      "/bin/sh", "-c",
       "echo $TEMPO_CONFIG_B64 | base64 -d > /tmp/tempo.yml && /tempo -config.file=/tmp/tempo.yml"
     ]
 

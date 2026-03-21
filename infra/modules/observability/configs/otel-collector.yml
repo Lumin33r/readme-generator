@@ -12,22 +12,6 @@ receivers:
       grpc:
         endpoint: "0.0.0.0:4317"
 
-  # Pull Lambda and SFN metrics from CloudWatch
-  awscloudwatch:
-    region: ${aws_region}
-    poll_interval: 1m
-    named_profile: ""
-    imds_retries: 1
-    metrics:
-      names:
-        - "AWS/Lambda"
-        - "AWS/States"
-      dimensions_filters:
-        FunctionName:
-          - "ReadmeGeneratorAgentInvoker"
-          - "ReadmeGeneratorParseS3Event"
-          - "RepoScannerTool"
-
 processors:
   # Batch spans before sending to Tempo
   batch:
@@ -90,7 +74,7 @@ service:
       processors: [resource, filter/drop_health, batch]
       exporters: [otlp/tempo, debug]
     metrics:
-      receivers: [otlp, awscloudwatch]
+      receivers: [otlp]
       processors: [batch]
       exporters: [prometheusremotewrite, debug]
     logs:

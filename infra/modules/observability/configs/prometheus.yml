@@ -8,9 +8,6 @@ global:
     cluster: readme-generator
     region: ${aws_region}
 
-# Remote-write receiver (accepts pushes from OTEL Collector)
-remote_write_receiver: {}
-
 scrape_configs:
   # Prometheus self-metrics
   - job_name: prometheus
