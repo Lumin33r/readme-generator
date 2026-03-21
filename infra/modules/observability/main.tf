@@ -597,8 +597,8 @@ resource "aws_ecs_task_definition" "grafana" {
     essential = true
 
     # Write datasource provisioning file then start Grafana
+    entryPoint = ["/bin/sh", "-c"]
     command = [
-      "/bin/sh", "-c",
       "mkdir -p /etc/grafana/provisioning/datasources && echo $DATASOURCES_B64 | base64 -d > /etc/grafana/provisioning/datasources/datasources.yaml && /run.sh"
     ]
 
